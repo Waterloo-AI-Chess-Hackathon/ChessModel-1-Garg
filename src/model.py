@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import chess
 from typing import Tuple
 
 class ChessModel(nn.Module):
@@ -40,12 +39,12 @@ class PolicyHead(nn.Module):
         super().__init__()
         self.conv1 = nn.Conv2d(256, 2, kernel_size=(1,1), bias=False)
         self.conv2 = nn.Conv2d(2, 73, kernel_size=(1,1))
-        self.bn = nn.BatchNorm2d(73)
+        self.bn = nn.BatchNorm2d(2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.bn(self.conv1(x)))
         x = self.conv2(x)
-        x = x.permute(0, 2, 3, 1).reshape(x.size(0), -1)
+        x = x.permute(0, 2, 3, 1).reshape(x.size(0), -1) # (batch_size, 2, 8, 8) -> (batch_size, 128)
         return x
     
 
@@ -63,7 +62,7 @@ class ValueHead(nn.Module):
         x = F.relu(x)
         x = x.flatten(start_dim=1)
         x = self.fc1(x)
-        x = self.relu(x)
+        x = F.relu(x)
         x = self.fc2(x)
 
         x = torch.tanh(x)
