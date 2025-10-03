@@ -1,6 +1,5 @@
 import chess
 import torch
-from game_caching import GameWindow
 
 PIECE_TYPES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
 
