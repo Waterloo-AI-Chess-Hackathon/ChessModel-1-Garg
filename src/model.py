@@ -44,7 +44,7 @@ class PolicyHead(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.bn(self.conv1(x)))
         x = self.conv2(x)
-        x = x.permute(0, 2, 3, 1).reshape(x.size(0), -1) # (batch_size, 2, 8, 8) -> (batch_size, 128)
+        x = x.permute(0, 2, 3, 1).reshape(x.size(0), -1) # (batch_size, 2, 8, 8) -> (batch_size, 4672)
         return x
     
 
