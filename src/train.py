@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 from typing import List, Dict, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import chess
 import random
@@ -46,13 +47,15 @@ class AlphaZeroTrainer:
     
     def __init__(self, device: str = "cpu", lr: float = 1e-3, 
                  num_simulations: int = 800, num_games: int = 100,
-                 buffer_size: int = 10000, batch_size: int = 32):
+                 buffer_size: int = 10000, batch_size: int = 32,
+                 num_workers: int = 1):
         self.device = torch.device(device)
         self.lr = lr
         self.num_simulations = num_simulations
         self.num_games = num_games
         self.buffer_size = buffer_size
         self.batch_size = batch_size
+        self.num_workers = max(1, int(num_workers))
         
         self.model = ChessModel().to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
@@ -141,18 +144,33 @@ class AlphaZeroTrainer:
             return value.item()
     
     def collect_training_data(self, num_games: int) -> List[SelfPlayGame]:
-        """Collect training data through self-play."""
-        print(f"Collecting {num_games} self-play games...")
-        games = []
-        
-        for i in range(num_games):
-            if i % 10 == 0:
-                print(f"Playing game {i+1}/{num_games}")
-            
-            game = self.play_self_game()
-            games.append(game)
-            
-            # Add to training buffer
+        """Collect training data through self-play.
+        Runs multiple games concurrently when num_workers > 1.
+        """
+        print(f"Collecting {num_games} self-play games with {self.num_workers} worker(s)...")
+        games: List[SelfPlayGame] = []
+
+        if self.num_workers <= 1:
+            # Fallback to serial execution
+            for i in range(num_games):
+                if i % 10 == 0:
+                    print(f"Playing game {i+1}/{num_games}")
+                game = self.play_self_game()
+                games.append(game)
+        else:
+            # Parallel execution
+            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                futures = [executor.submit(self.play_self_game) for _ in range(num_games)]
+                completed = 0
+                for future in as_completed(futures):
+                    game = future.result()
+                    games.append(game)
+                    completed += 1
+                    if completed % 10 == 0 or completed == num_games:
+                        print(f"Completed games: {completed}/{num_games}")
+
+        # Append to training buffer on the main thread
+        for game in games:
             for board, policy, value in game.positions:
                 # Convert policy dict to tensor
                 policy_tensor = torch.zeros(4672, device=self.device)
@@ -160,17 +178,16 @@ class AlphaZeroTrainer:
                     move_idx = self._move_to_index(move, board)
                     if move_idx is not None:
                         policy_tensor[move_idx] = prob
-                
-                # Value should be from perspective of current player at this position
-                # If white to move, use result as-is; if black to move, flip it
+
+                # Value from perspective of side to move in this position
                 result_from_perspective = game.result if board.turn == chess.WHITE else -game.result
-                
+
                 self.training_buffer.append({
                     'state': encode_state([board], device=self.device),
                     'policy': policy_tensor,
                     'value': torch.tensor(result_from_perspective, dtype=torch.float32, device=self.device)
                 })
-        
+
         return games
     
     def _move_to_index(self, move: chess.Move, board: chess.Board) -> Optional[int]:
@@ -348,7 +365,8 @@ def train_alphazero(
     training_epochs: int = 1,
     save_freq: int = 10,
     eval_freq: int = 5,
-    device: str = "cpu"
+    device: str = "cpu",
+    num_workers: int = 1,
 ):
     """Train an AlphaZero-style chess model."""
     
@@ -356,7 +374,8 @@ def train_alphazero(
         device=device,
         lr=1e-3,
         num_simulations=800,
-        num_games=games_per_iteration
+        num_games=games_per_iteration,
+        num_workers=num_workers,
     )
     
     print(f"Starting AlphaZero training for {total_iterations} iterations")
