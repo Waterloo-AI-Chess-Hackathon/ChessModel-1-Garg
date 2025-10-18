@@ -1,13 +1,18 @@
 from model import ChessModel
 import torch
+import chess
 
-device = torch.device("mps")
-model = ChessModel()
+board = chess.Board()
 
-model.to(device)
-model.eval()
+print(type(board))
 
-policy, value = model.forward(torch.randn(1, 119, 8, 8).to(device))
+# device = torch.device("mps")
+# model = ChessModel()
+
+# model.to(device)
+# model.eval()
+
+# policy, value = model.forward(torch.randn(1, 119, 8, 8).to(device))
 
 
 

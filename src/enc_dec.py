@@ -181,8 +181,8 @@ def _move_to_policy_index(move: chess.Move, board: chess.Board | None = None) ->
 
         plane = SLIDING_DIRECTION_INDEX[direction] * 7 + (distance - 1)
 
-    if plane is None:
-        return None
+    # if plane is None:
+    #     return None
 
     return from_sq * NUM_POLICY_PLANES + plane
 
