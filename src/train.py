@@ -419,6 +419,7 @@ def train_alphazero(
     eval_freq: int = 5,
     device: str = "cpu",
     num_workers: int = 1,
+    checkpoint_path: Optional[str] = None,
 ):
     """Train an AlphaZero-style chess model."""
     
@@ -433,6 +434,12 @@ def train_alphazero(
     print(f"Starting AlphaZero training for {total_iterations} iterations")
     print(f"Device: {device}")
     print(f"Games per iteration: {games_per_iteration}")
+    if checkpoint_path:
+        try:
+            trainer.load_model(checkpoint_path)
+            print(f"Resumed from checkpoint: {checkpoint_path}")
+        except Exception as e:
+            print(f"Warning: failed to load checkpoint '{checkpoint_path}': {e}. Starting from scratch.")
     
     start_time = time.time()
     
