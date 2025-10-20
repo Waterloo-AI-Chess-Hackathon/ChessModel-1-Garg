@@ -74,8 +74,10 @@ class AlphaZeroTrainer:
         print(f"AlphaZero trainer initialized on {self.device}")
         print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
     
-    def play_self_game(self) -> SelfPlayGame:
-        """Play a single self-play game using MCTS."""
+    def play_self_game(self, game_id: Optional[int] = None) -> SelfPlayGame:
+        """Play a single self-play game using MCTS.
+        When game_id is provided, include it in verbose logs to disambiguate parallel output.
+        """
         game = SelfPlayGame()
         env = ChessEnv()
         obs, _ = env.reset()
@@ -94,21 +96,19 @@ class AlphaZeroTrainer:
         step_count = 0
         max_steps = 200  # Prevent infinite games
         
+        if game_id is not None:
+            print(f"[GAME {game_id}] Starting self-play game")
+
         while not done and step_count < max_steps:
-            # Get current board state for MCTS
             board = env.board
             
-            # Temperature scheduling: use temp=1.0 for first 30 moves, then 0.1
             current_temp = 1.0 if step_count < 30 else 0.1
             mcts.temperature = current_temp
             
-            # Get MCTS move and probabilities
             best_move, move_probs = mcts.search(board)
             
-            # Convert move to action index
             action = self._move_to_action_index(best_move, board)
             if action is None:
-                # Fallback to random legal move
                 legal_moves = list(board.legal_moves)
                 if legal_moves:
                     best_move = random.choice(legal_moves)
@@ -116,23 +116,48 @@ class AlphaZeroTrainer:
                 else:
                     break
             
-            # Add position to game
             value = self._evaluate_position(board)
             game.add_position(board, move_probs, value)
             game.add_move(best_move)
+
+            # Verbose per-move logging
+            try:
+                san = board.san(best_move)
+            except Exception:
+                san = best_move.uci()
+            side_to_move = 'White' if board.turn == chess.WHITE else 'Black'
+            # Prepare top-5 policy moves for logging
+            try:
+                top_moves = sorted(move_probs.items(), key=lambda kv: kv[1], reverse=True)[:5]
+                top_moves_str = ", ".join([
+                    f"{board.san(m) if m in board.legal_moves else m.uci()}:{p:.3f}"
+                    for m, p in top_moves
+                ])
+            except Exception:
+                top_moves_str = "(unavailable)"
+            prefix = f"[GAME {game_id}] " if game_id is not None else ""
+            print(
+                f"{prefix}Move {step_count+1} | {side_to_move} to play | temp={current_temp:.2f} | "
+                f"chosen={san} ({best_move.uci()}) | value={value:.3f} | top-p={top_moves_str}"
+            )
             
-            # Step environment
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             step_count += 1
+            # Post-step feedback
+            result_flag = "terminated" if terminated else ("truncated" if truncated else "cont")
+            print((f"[GAME {game_id}] " if game_id is not None else "") +
+                  f" -> env.step reward={reward:.3f} | status={result_flag}")
         
-        # Set game result from environment
         if env.board.is_checkmate():
             result = -1.0 if env.board.turn == chess.WHITE else 1.0
         else:
-            result = 0.0  # Draw
+            result = 0.0
         
         game.set_result(result)
+        if game_id is not None:
+            outcome = "White wins" if result > 0 else ("Draw" if result == 0 else "Black wins")
+            print(f"[GAME {game_id}] Game finished in {step_count} moves | Result: {outcome}")
         return game
     
     def _evaluate_position(self, board: chess.Board) -> float:
@@ -151,18 +176,18 @@ class AlphaZeroTrainer:
         games: List[SelfPlayGame] = []
 
         if self.num_workers <= 1:
-            # Fallback to serial execution
             for i in range(num_games):
-                if i % 10 == 0:
-                    print(f"Playing game {i+1}/{num_games}")
-                game = self.play_self_game()
+                print(f"[DISPATCH] Playing game {i+1}/{num_games}")
+                game = self.play_self_game(game_id=i+1)
                 games.append(game)
         else:
             # Parallel execution
             with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-                futures = [executor.submit(self.play_self_game) for _ in range(num_games)]
+                futures = {executor.submit(self.play_self_game, gid + 1): gid + 1 for gid in range(num_games)}
                 completed = 0
                 for future in as_completed(futures):
+                    gid = futures[future]
+                    print(f"[COMPLETE] Game {gid} finished")
                     game = future.result()
                     games.append(game)
                     completed += 1
@@ -187,6 +212,8 @@ class AlphaZeroTrainer:
                     'policy': policy_tensor,
                     'value': torch.tensor(result_from_perspective, dtype=torch.float32, device=self.device)
                 })
+
+        print(f"Appended {sum(len(g.positions) for g in games)} positions into training buffer (size={len(self.training_buffer)})")
 
         return games
     
@@ -254,6 +281,11 @@ class AlphaZeroTrainer:
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
             num_batches += 1
+
+            print(
+                f"[TRAIN] Batch {num_batches} | policy_loss={policy_loss.item():.4f} "
+                f"value_loss={value_loss.item():.4f} total={total_loss.item():.4f}"
+            )
         
         self.model.eval()
         
@@ -306,12 +338,14 @@ class AlphaZeroTrainer:
         step_count = 0
         max_steps = 200
         
+        print("[EVAL] Starting evaluation game")
+
         while not done and step_count < max_steps:
             board = env.board
             
             if board.turn == chess.WHITE:
                 # Our model plays white
-                best_move, _ = mcts.search(board)
+                best_move, move_probs = mcts.search(board)
                 action = self._move_to_action_index(best_move, board)
                 if action is None:
                     # Fallback to random move
@@ -333,14 +367,32 @@ class AlphaZeroTrainer:
             if action is None:
                 break
                 
+            # Verbose eval move logging
+            try:
+                san = board.san(best_move)
+            except Exception:
+                san = best_move.uci()
+            if board.turn == chess.WHITE:
+                try:
+                    top_moves = sorted(move_probs.items(), key=lambda kv: kv[1], reverse=True)[:3]
+                    top_str = ", ".join([f"{board.san(m) if m in board.legal_moves else m.uci()}:{p:.3f}" for m, p in top_moves])
+                except Exception:
+                    top_str = "(unavailable)"
+                print(f"[EVAL] Move {step_count+1} | White plays {san} | top-p={top_str}")
+            else:
+                print(f"[EVAL] Move {step_count+1} | Black plays {san} (random)")
+
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             step_count += 1
         
         # Return result from white's perspective
         if env.board.is_checkmate():
-            return -1.0 if env.board.turn == chess.WHITE else 1.0
+            res = -1.0 if env.board.turn == chess.WHITE else 1.0
+            print(f"[EVAL] Finished in {step_count} moves | Result: {'White wins' if res>0 else 'Black wins'}")
+            return res
         else:
+            print(f"[EVAL] Finished in {step_count} moves | Result: Draw")
             return 0.0
     
     def save_model(self, path: str):
@@ -430,6 +482,7 @@ if __name__ == "__main__":
     random.seed(42)
     
     device = "mps" if torch.backends.mps.is_available() else "cpu"
+    # device = "cpu"
     print(f"Using device: {device}")
     
     train_alphazero(
@@ -438,5 +491,6 @@ if __name__ == "__main__":
         training_epochs=10,
         save_freq=50,
         eval_freq=25,
-        device=device
+        device=device,
+        num_workers=50
     )
